@@ -1,6 +1,7 @@
 "use client"
 
 import { useSyncExternalStore } from "react"
+import { embedCards } from "@/lib/embeddings"
 import { removeSetFromFolders } from "@/lib/folders"
 import { clearLearnState } from "@/lib/learn"
 import { clearStars } from "@/lib/stars"
@@ -110,6 +111,7 @@ export function createSet(input: StudySetInput): StudySet {
   const now = Date.now()
   const set: StudySet = { ...input, id: createId(), createdAt: now, updatedAt: now }
   save([set, ...getSnapshot()])
+  embedCards(set.cards)
   return set
 }
 
@@ -119,6 +121,7 @@ export function updateSet(id: string, input: StudySetInput) {
       set.id === id ? { ...set, ...input, updatedAt: Date.now() } : set
     )
   )
+  embedCards(input.cards)
 }
 
 export function deleteSet(id: string) {

@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.3.1",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.5.0",
     "katex": "^0.19.0",

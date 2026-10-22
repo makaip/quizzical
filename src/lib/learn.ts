@@ -1,5 +1,6 @@
 "use client"
 
+import { embeddingFor, similarity } from "@/lib/embeddings"
 import { createLocalStore, parseRecord } from "@/lib/local-store"
 import type { Card } from "@/lib/sets"
 
@@ -144,6 +145,14 @@ export type Question = {
 
 let questionCount = 0
 
+const CHOICES = 3
+// Above this, an option probably means the same thing as the answer.
+const TOO_SIMILAR = 0.85
+// How strongly close options are preferred. Lower is pickier, higher is closer to random.
+const TEMPERATURE = 0.1
+// How much a similar prompt counts next to a similar answer.
+const PROMPT_WEIGHT = 0.3
+
 export function makeQuestion(
   card: Card,
   type: QuestionType,
@@ -151,21 +160,52 @@ export function makeQuestion(
   allCards: Card[]
 ): Question {
   const answer = card[answerWith]
-  let options: string[] = []
-  if (type === "choice") {
-    const seen = new Set([normalize(answer)])
-    const wrong: string[] = []
-    for (const other of shuffled(allCards)) {
-      const text = other[answerWith]
-      const normalized = normalize(text)
-      if (seen.has(normalized)) continue
-      seen.add(normalized)
-      wrong.push(text)
-      if (wrong.length === 3) break
-    }
-    options = shuffled([answer, ...wrong])
-  }
+  const options = type === "choice" ? shuffled([answer, ...pickWrong(card, answerWith, allCards)]) : []
   return { key: `q${questionCount++}`, card, type, answer, options }
+}
+
+/**
+ * Wrong options, favoring answers that are close in meaning to the right one
+ * (or whose prompts are close to this card's prompt), with some randomness so
+ * the same card doesn't always get the same options. Random when embeddings
+ * haven't been computed yet.
+ */
+function pickWrong(card: Card, answerWith: Side, allCards: Card[]) {
+  const promptSide: Side = answerWith === "term" ? "definition" : "term"
+  const answerVector = embeddingFor(card[answerWith])
+  const promptVector = embeddingFor(card[promptSide])
+
+  // Skip cards with the same answer, and cards with the same prompt: their
+  // answer would also be right.
+  const seen = new Set([normalize(card[answerWith])])
+  const samePrompt = normalize(card[promptSide])
+  const candidates: { text: string; weight: number }[] = []
+  for (const other of shuffled(allCards)) {
+    const text = other[answerWith]
+    const normalized = normalize(text)
+    if (seen.has(normalized) || normalize(other[promptSide]) === samePrompt) continue
+    seen.add(normalized)
+
+    let score = 0
+    const otherAnswer = answerVector && embeddingFor(text)
+    if (answerVector && otherAnswer) {
+      const answerScore = similarity(answerVector, otherAnswer)
+      if (answerScore > TOO_SIMILAR) continue
+      score += (1 - PROMPT_WEIGHT) * answerScore
+    }
+    const otherPrompt = promptVector && embeddingFor(other[promptSide])
+    if (promptVector && otherPrompt) score += PROMPT_WEIGHT * similarity(promptVector, otherPrompt)
+    candidates.push({ text, weight: Math.exp(score / TEMPERATURE) })
+  }
+
+  const wrong: string[] = []
+  while (wrong.length < CHOICES && candidates.length > 0) {
+    let roll = Math.random() * candidates.reduce((sum, c) => sum + c.weight, 0)
+    let index = candidates.findIndex((c) => (roll -= c.weight) <= 0)
+    if (index === -1) index = candidates.length - 1
+    wrong.push(candidates.splice(index, 1)[0].text)
+  }
+  return wrong
 }
 
 /** Lowercase, collapse spaces, and ignore most punctuation and Markdown marks. */

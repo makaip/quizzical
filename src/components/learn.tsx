@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { useId, useState } from "react"
+import { useEffect, useEffectEvent, useId, useState } from "react"
 import { GraduationCapIcon, Settings2Icon, XIcon } from "lucide-react"
 import { toast } from "sonner"
 import { LearnSession } from "@/components/learn-session"
@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Skeleton } from "@/components/ui/skeleton"
+import { embedCards, loadEmbeddings } from "@/lib/embeddings"
 import {
   ROUND_SIZE_MAX,
   ROUND_SIZE_MIN,
@@ -66,8 +67,27 @@ export function Learn({
   const [confirmRestart, setConfirmRestart] = useState(false)
   // Bumped to start a fresh session after restarting.
   const [session, setSession] = useState(0)
+  // The deck whose saved embeddings have been read, so the first question's
+  // options can use them.
+  const [loadedDeck, setLoadedDeck] = useState<string | null>(null)
 
-  if (learn === null) return <LearnSkeleton />
+  const loadDeck = useEffectEvent(() => {
+    // Fills in cards saved before embeddings existed, or whose vectors were cleared.
+    embedCards(allCards)
+    return loadEmbeddings(allCards)
+  })
+
+  useEffect(() => {
+    let cancelled = false
+    loadDeck().then(() => {
+      if (!cancelled) setLoadedDeck(deckKey)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [deckKey])
+
+  if (learn === null || loadedDeck !== deckKey) return <LearnSkeleton />
 
   const { settings } = learn
   const starredCards = allCards.filter((card) => starred.has(card.id))
