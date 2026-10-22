@@ -22,9 +22,19 @@ export function embeddingText(text: string) {
     .trim()
 }
 
+/** Both sides together, which says more about a card's topic than a short term alone. */
+function wholeCardText(card: Card) {
+  return embeddingText(`${card.term}: ${card.definition}`)
+}
+
 /** The vector for some card text, if it's been loaded. */
 export function embeddingFor(text: string): Float32Array | undefined {
   return memory.get(embeddingText(text))
+}
+
+/** The vector for a whole card, if it's been loaded. */
+export function cardEmbeddingFor(card: Card): Float32Array | undefined {
+  return memory.get(wholeCardText(card))
 }
 
 /** Cosine similarity of two normalized vectors. */
@@ -37,8 +47,7 @@ export function similarity(a: Float32Array, b: Float32Array) {
 function cardTexts(cards: Card[]) {
   const texts = new Set<string>()
   for (const card of cards) {
-    for (const text of [card.term, card.definition]) {
-      const clean = embeddingText(text)
+    for (const clean of [embeddingText(card.term), embeddingText(card.definition), wholeCardText(card)]) {
       if (clean) texts.add(clean)
     }
   }

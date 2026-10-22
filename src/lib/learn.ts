@@ -1,6 +1,6 @@
 "use client"
 
-import { embeddingFor, similarity } from "@/lib/embeddings"
+import { cardEmbeddingFor, embeddingFor, similarity } from "@/lib/embeddings"
 import { createLocalStore, parseRecord } from "@/lib/local-store"
 import type { Card } from "@/lib/sets"
 
@@ -150,8 +150,14 @@ const CHOICES = 3
 const TOO_SIMILAR = 0.85
 // How strongly close options are preferred. Lower is pickier, higher is closer to random.
 const TEMPERATURE = 0.1
-// How much a similar prompt counts next to a similar answer.
-const PROMPT_WEIGHT = 0.3
+// How much each kind of likeness counts. Whole cards say the most about topic,
+// since short answers on their own embed poorly.
+const CARD_WEIGHT = 0.7
+const ANSWER_WEIGHT = 0.3
+const SHAPE_WEIGHT = 0.3
+// Options are only drawn from this many of the closest answers, so a big deck's
+// many unrelated answers can't outweigh the few close ones.
+const POOL_SIZE = 6
 
 export function makeQuestion(
   card: Card,
@@ -165,47 +171,101 @@ export function makeQuestion(
 }
 
 /**
- * Wrong options, favoring answers that are close in meaning to the right one
- * (or whose prompts are close to this card's prompt), with some randomness so
- * the same card doesn't always get the same options. Random when embeddings
- * haven't been computed yet.
+ * Wrong options, favoring answers that look like the right one and cards close
+ * in meaning to this one, with some randomness so the same card doesn't always
+ * get the same options. Only shape is used when embeddings haven't been
+ * computed yet.
  */
 function pickWrong(card: Card, answerWith: Side, allCards: Card[]) {
   const promptSide: Side = answerWith === "term" ? "definition" : "term"
   const answerVector = embeddingFor(card[answerWith])
-  const promptVector = embeddingFor(card[promptSide])
+  const cardVector = cardEmbeddingFor(card)
 
   // Skip cards with the same answer, and cards with the same prompt: their
   // answer would also be right.
   const seen = new Set([normalize(card[answerWith])])
   const samePrompt = normalize(card[promptSide])
-  const candidates: { text: string; weight: number }[] = []
+  const candidates: { text: string; score: number }[] = []
   for (const other of shuffled(allCards)) {
     const text = other[answerWith]
     const normalized = normalize(text)
     if (seen.has(normalized) || normalize(other[promptSide]) === samePrompt) continue
     seen.add(normalized)
 
-    let score = 0
+    let score = SHAPE_WEIGHT * shapeSimilarity(card[answerWith], text)
     const otherAnswer = answerVector && embeddingFor(text)
     if (answerVector && otherAnswer) {
       const answerScore = similarity(answerVector, otherAnswer)
       if (answerScore > TOO_SIMILAR) continue
-      score += (1 - PROMPT_WEIGHT) * answerScore
+      score += ANSWER_WEIGHT * answerScore
     }
-    const otherPrompt = promptVector && embeddingFor(other[promptSide])
-    if (promptVector && otherPrompt) score += PROMPT_WEIGHT * similarity(promptVector, otherPrompt)
-    candidates.push({ text, weight: Math.exp(score / TEMPERATURE) })
+    const otherCard = cardVector && cardEmbeddingFor(other)
+    if (cardVector && otherCard) score += CARD_WEIGHT * similarity(cardVector, otherCard)
+    candidates.push({ text, score })
   }
 
+  const pool = candidates
+    .sort((a, b) => b.score - a.score)
+    .slice(0, POOL_SIZE)
+    .map((c) => ({ text: c.text, weight: Math.exp(c.score / TEMPERATURE) }))
   const wrong: string[] = []
-  while (wrong.length < CHOICES && candidates.length > 0) {
-    let roll = Math.random() * candidates.reduce((sum, c) => sum + c.weight, 0)
-    let index = candidates.findIndex((c) => (roll -= c.weight) <= 0)
-    if (index === -1) index = candidates.length - 1
-    wrong.push(candidates.splice(index, 1)[0].text)
+  while (wrong.length < CHOICES && pool.length > 0) {
+    let roll = Math.random() * pool.reduce((sum, c) => sum + c.weight, 0)
+    let index = pool.findIndex((c) => (roll -= c.weight) <= 0)
+    if (index === -1) index = pool.length - 1
+    wrong.push(pool.splice(index, 1)[0].text)
   }
   return wrong
+}
+
+type Shape = {
+  kind: "math" | "formula" | "number" | "word" | "phrase" | "sentence"
+  length: number
+  digits: boolean
+  capitalized: boolean
+}
+
+/** Plain-text math like `E[X]E[Y]`, `f(x)` or `k-1`. */
+function isFormula(text: string) {
+  return (
+    /[[\]{}=^_\\<>|]|\w\(/.test(text) ||
+    /\p{L}\s*[-+*/]\s*\d|\d\s*[-+*/]\s*\p{L}/u.test(text)
+  )
+}
+
+function shapeOf(text: string): Shape {
+  const trimmed = text.trim()
+  const words = trimmed.split(/\s+/).filter(Boolean).length
+  const kind = trimmed.includes("$")
+    ? "math"
+    : /^[-+]?[\d.,:/%\s]+$/.test(trimmed)
+      ? "number"
+      : isFormula(trimmed)
+        ? "formula"
+        : words <= 1
+          ? "word"
+          : words > 8 || /[.!?]$/.test(trimmed)
+            ? "sentence"
+            : "phrase"
+  return {
+    kind,
+    length: trimmed.length,
+    digits: /\d/.test(trimmed),
+    capitalized: /^\p{Lu}/u.test(trimmed),
+  }
+}
+
+/**
+ * 0 to 1: how alike two answers look, so a wrong option isn't given away by
+ * being a number among words, or a sentence among single words.
+ */
+function shapeSimilarity(a: string, b: string) {
+  const x = shapeOf(a)
+  const y = shapeOf(b)
+  const kind = x.kind === y.kind ? 1 : 0
+  const length = Math.min(x.length, y.length) / Math.max(x.length, y.length, 1)
+  const traits = (Number(x.digits === y.digits) + Number(x.capitalized === y.capitalized)) / 2
+  return 0.4 * kind + 0.4 * length + 0.2 * traits
 }
 
 /** Lowercase, collapse spaces, and ignore most punctuation and Markdown marks. */
